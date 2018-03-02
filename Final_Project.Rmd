@@ -1,0 +1,363 @@
+---
+title: "Analysis of Player Performance in the NBA"
+author: "Gabriel Zanuttini-Frank"
+date: "May 9, 2017"
+output: pdf_document
+header-includes:
+  - \setlength\parindent{24pt}
+---
+
+# Introduction
+
+General managers in the NBA have an extremely difficult job. With a limited amount of money and time, they are expected to assemble a group of basketball players that will be competitive, get along well with each other, and most importantly win championships. Making this job even tougher (or more interesting, depending on one's perspective) is the fact that there is no obvious way to determine which players are more valuable than others. Of course LeBron James is the best player in the world, but after him there is little consensus and constant debate about who is next. Traditionally, basketball players were evaluated based on four main factors: their size, effort, points per game, rebounds per game, assists per game, and the "eye test" (whether they have a good feel for the game and look comfortable and natural on the court). Recently, however, general managers have begun to realize that certain, more complicated, statistics are more important in identifying the superior players than the ones that appear in the standard box score. Furthermore, a general manager cannot simply identify the 12 best available players and expect them to become a competitive team. A team must consist of a number of players with different skill sets that complement each other, as well as address the many facets to the game of basketball (scoring, rebounding, defending, etc.). Similar to new statistics being used, teams have experimented using lineups that do not necessarily employ the typical five positions: point guard, shooting guard, small forward, power forward, and center.
+
+## Design and Primary Questions
+
+I will use three different multivariate techniques in an attempt to figure out ways to address the challenge of building a successful NBA team:
+
+* **Principal components analysis** will allow me to reduce the dimensionality of my data in order to identify the components, or combinations of statistics, that account for the most variability among players. The results will be useful in showing the characteristics of a player that general managers should look into when comparing them to others.
+* **Cluster analysis** will provide better insight into the different kinds of basketball players that exist. Rather than grouping players into categories based on the positions they are listed by, the clusters will group them based on their strengths and weaknesses as well as their roles on their respective teams. This will be useful in building a team because it will allow general managers to diversify the strengths of their players.
+* I will use **MANOVA** to explore the variation among positions for players' average distance covered and average speed during a game. This will be a general way to determine the positions that play similar roles and in similar manners, and are therefore more interchangeable. In addition, I will explore how players' average distances and speeds vary with age. This will provide a baseline against which specific players can be compared, to recognize whether they may be physically slowing down more quickly than others of the same position.
+
+# Data
+
+I used two combined datasets for my analysis. For PCA and cluster analysis, I used data containing basic per-game statistics for each NBA player from the 2015-2016 season, and for MANOVA I used SportVU player tracking data, also from the 2015-2016 season.
+
+* There are 57 variables in this dataset
+    + Three are categorical: Team, Position, and Age Range
+    + The remainder are continuous and fall into four categories:
+        - *Shooting*: this includes the number of makes and attempts per game, as well as the percentage for field goals (all shots), three pointers, two pointers, and free throws. In addition, eFG. corresponds to effective field goal percentage, which uses this formula (FG + 0.5 * 3P) / FGA that adjusts for the fact that a 3-point field goal is worth one point more than a 2-pointer.
+        - *Basic counting statistics*: these include statistics that show up commonly in box scores, namely: points, offensive and defensive rebounds, assists, steals, blocks, turnovers, fouls, minutes played, games played, and games started.
+        - *Advanced statistics*: the statistics that I primarily used from this category are percentages for each basic statistic (for example, ORB. is offensive rebounding percentage, corresponding to the percentage of available offensive rebounds that a player got when in the game), X3PAr (three point attempt rate, or the percentage of one's shots that are 3-pointers), FTr (free throw rate), and TS. (true shooting percentage - a more advanced shooting metric that again takes into account the different values of shots).
+        - *Player tracking*: this includes average distance traveled in feet per game, as well as average distance, average distance on offense, average distance on defense, average speed, average speed on offense, and average speed on defense, all measured in miles or miles per hour.
+
+* The dataset contains 476 observations, or players. One challenged I faced was eliminating players that had multiple entries so that their numbers would not be counted twice. This occurred for players that were traded during the season, as their statistics for each team were split up into different rows. In addition, often in my analyses I found it useful to eliminate observations of players that played very few games or minutes because they might have very extreme values for certain statistics having not played enough for them to even out.
+* The data was collected from two sources. The first three categories (shooting, basic and advanced statistics) were taken from [basketball-reference.com](www.basketball-reference.com), and the player tracking data was taken from [NBA.com](http://stats.nba.com).
+* The NBA measures and publishes data for hundreds of variables. Therefore, my data is by no means complete, and similar analyses conducted with different variables could produce different results. However, I tried to include the more general statistics that covered all of the major aspects of the game rather than going into great depth in one certain category, such as shooting or defense.
+* I used chi-squared quantile plots to examine the multivariate normality of my continuous variables.
+```{r echo=FALSE}
+x <- read.csv("NBA_stats_totals.csv", as.is = TRUE)
+tradedplayers <- which(x$Tm=="TOT")
+for (i in tradedplayers) {
+  x$Player[i+1] <- NA
+  x$Player[i+2] <- NA
+}
+splitplayers <- which(is.na(x$Player))
+x <- x[-splitplayers,]
+for (i in 1:nrow(x)) {
+  if (is.na(x$X3P.[i])) {
+    x$X3P.[i] <- 0.001
+  }
+}
+lowmp <- which(x$MP<400)
+x <- x[-lowmp,]
+x <- subset(x, select = -c(Player, Pos, Tm, eFG., PTS, FG, FGA, TRB))
+source("http://www.reuningscherer.net/STAT660/R/CSQPlot.r.txt")
+CSQPlot(x, label="NBA Player Stats")
+```
+
+This data does not seem to quite have a multivariate normal distribution, as the data in the chi-squared quantile plot does not mostly lie within the 95% confidence boundaries. I tried to transform all of the variables by taking square roots of counts and computing logits of percentages, but found that it did not significantly improve the chi-squared plot, so I will proceed with the original data.
+- Because this dataset has lots of observations and variables, it sometimes was slightly harder to work with and understand everything that was going on.
+
+# Principal Components Analysis
+
+The first step toward performing principal components analysis is computing and observing correlations between the variables.
+```{r echo=FALSE}
+round(cor(x),2)
+```
+
+Many of the relationships I observed in this correlation matrix are intuitive. For example, minutes played is highly correlated with games played and games started, which makes sense because they all signify roughly the same characteristic about a player, namely that he plays a lot. Field goal % is strongly correlated with two point % and has a strong negative correlation with 3 point and free throw percentage. These factors point to a difference in the skills between players of different positions; guards tend to shoot better from the three point and free throw lines while big men shoot better inside (for two points).
+
+The next step is to determine how many principal components to retain. There are four different methods or criteria that I will employ to guide me toward a decision in that regard: Eigenvalue>1 criterion, cumulative variance explained method, scree plot, parallel analysis.
+```{r echo=FALSE}
+pc1 <- princomp(x, cor=TRUE)
+print(summary(pc1),digits=2,cutoff=0)
+```
+* The Eigenvalue > 1 criteria would suggest keeping 4 components.
+* The ~80% of total variance explained method would suggest keeping 5, which explain roughly 81% of total variance.
+
+```{r echo=FALSE}
+screeplot(pc1,type="lines",col="red",lwd=2,pch=19,cex=1.2,main="Scree Plot")
+```
+
+* Despite the previous indications that 4 or 5 was the correct number of components to retain, the scree plot above pretty convincingly suggests keeping only 2.
+
+```{r echo=FALSE}
+source("http://www.reuningscherer.net/STAT660/R/parallel.r.txt")
+parallelplot(pc1)
+```
+
+* Lastly, parallel analysis strongly supports keeping only two components as well. 
+
+  Looking more closely at the Eigenvalue and total explained variance methods that suggested four components, it becomes increasingly evident that 2 is the right choice. Putting aside the cutoff of Eigenvalue=1, there is a much more significant decrease from the second to the third Eigenvalue than from the third to fourth or fourth to fifth. Thus, keeping two components rather than four does not greatly decrease the total explained variance. As a result **I will choose to keep only the first two principal components.**
+
+Next, I will examine the loadings of the two principal components I decided to retain.
+
+```{r echo=FALSE}
+pc1$loadings[,1:2]
+```
+
+The first component can be interpreted as the overall skill of a player. The variables with the most weight in the first component are: minutes played, two-point attempts and conversions, free throw attempts and makes, defensive rebounds, and personal fouls. These are all statistics that can generally distinguish between players that play more and less often, which is usually a good measure of a player's skill. The second component represents the size or position of a player, specifically whether he is a guard or a big man. The most impactful variables in this component are field goal and two point % (positive), three point and free throw % (negative), three pointers attempted and made (negative), and offensive rebounds (positive). All of these variables highlight the biggest differences between guards and big men, and examining their the signs suggests that big men have high positive values while guards' values in this component are more negative.
+
+```{r echo=FALSE}
+biplot(pc1,choices=c(1,2),pc.biplot=T)
+```
+
+Though it is difficult to discern a pattern in the distribution of factors for component 1 in this biplot, component 2 is more clearly interpretable. In the negative direction are factors that would point towards smaller players, such as three point attempts and percentage, whereas the positive direction has factors that would point towards bigger players, such as blocks and field goal percentage. This provides further support for the interpretation of component 2 as position.
+
+I think that PCA was effective in reducing the dimensionality of my data. The two components that I ended up keeping summarize the two characteristics that most describe NBA players: talent and position. This does not provide much new insight (perhaps using more nuanced data than general box score statistics could have accomplished this), but it definitely reinforces the general intuitions of which kinds of players accumulate which kinds of statistics, and which statistics characterize better players. From looking at the score plots, it is evident thatthe best players are outliers. This makes sense because they are stars due to the fact that their statistics differ most from the mean. Overall, I did not run into many problems with my dataset. I had to fill in some NA's and slightly alter certain statistics when doing transformations, but the sample size was plenty large enough relative to the number of variables even after filtering out less significant players.
+
+
+# Cluster Analysis
+
+```{r echo=FALSE}
+nbastats <- read.csv("NBA_stats_pergame_clean.csv", as.is=TRUE)
+low <- which(nbastats$MP<30 | nbastats$G<60) # 20, 50
+nbastats <- nbastats[-low,]
+nbanorm <- scale(nbastats[,5:42])
+rownames(nbanorm)=nbastats[,1]
+
+```
+
+For cluster analysis, I used the same statistics as I did for principal components analysis. Instead of trying log and square root transformations as I did for PCA, I standardized the variables. This is because there are a number of different scales and ranges on which variables are measured in this dataset. For example, certain variables are measured as percentages, others (such as blocks) have ranges of around 0-4, while others (such as points) range from 0 to 30. By standardizing all of them, each variable will have the same weight and effect for clustering the players.
+
+The data I am using has all continuous variables, meaning that none of them are binary or categorical. This means that I should use one of the common continuous distance metrics, such as Euclidean or Manhattan. I generated dendrograms using both the Ward and average linkage agglomeration methods, each with both Euclidean and Manhattan distance. I found that Ward's Method produced the best looking dendrograms with better defined group boundaries. On the other hand, average linkage is more sensitive to outliers, so it creates many small groups, rather than a smaller number of more equally sized groups. Below are the two dendrograms produced using Ward's Method.
+
+```{r echo=FALSE}
+disteuclid <- dist(nbanorm, method="euclidean")
+distman <- dist(nbanorm, method="manhattan")
+
+clust1ward <- hclust(disteuclid, method="ward.D")
+clust1avg <- hclust(disteuclid, method="average")
+
+clust2ward <- hclust(distman, method="ward.D")
+clust2avg <- hclust(distman, method="average")
+
+plot(clust1ward,labels=nbastats$Player, cex=0.5, xlab="",ylab="Distance",main="Dendrogram of Euclidean and Ward's Method")
+rect.hclust(clust1ward,k=3, border=4)
+rect.hclust(clust1ward,k=10)
+
+plot(clust2ward,labels=nbastats$Player, cex=0.5, xlab="",ylab="Distance",main="Dendrogram of Manhattan and Ward's Method")
+rect.hclust(clust2ward, k=3, border = 4)
+```
+
+Simply from observing both dendrograms, it appears that there are three well-defined clusters, which contain many of the same players in both cases. If I try to divide the tree into four groups, rather than maintain equally sized groups, the fourth group consists of only three or four players from within one group. This leads me to believe that the fourth group defines only a very particular set of players, rather than helping to create a general classification of players. The three main groups that emerged from this clustering (outlined by the blue lines) can be explained (from left to right) as big men, high usage players (players with the ball in their hands most of the time), and more secondary/role players (essentially the players on teams of a high usage player who therefore play off of the ball more often). Some variables that might define each group could be high blocks, rebounds, and low three point shots for big men; high field goal attempts, usage rate, and assists for the high usage (star player) group; and high three point percentage, fewer minutes, field goal attempts, and points for the third, role player group.
+
+If I had wanted to define more specific groups, I could have chosen 10 clusters, as shown by the red outline in the Euclidean and Ward's Method dendrogram. Since I am knowledgable about all of the players and their tendencies, I would be able to define each group's main characteristics. However, I believe that having such a large number of groups would be more worthwhile if I had included more players, so **I will proceed with the three cluster solution.**
+
+### K-Means Clustering
+
+I next performed k-means clustering on the data as another method of partitioning the players into different numbers of groups. Again, I used the standardized data.
+
+```{r echo=FALSE}
+clusters <- 3
+cuts <- cutree(clust1ward, k=clusters)
+km1 <- kmeans(nbanorm,centers=clusters)
+
+# kdata is just normalized input dataset
+kdata <- nbanorm
+n.lev <- 15  # set max value for k
+
+# Calculate the within groups sum of squared error (SSE) for the number of cluster solutions selected by the user
+wss <- rnorm(10)
+while (prod(wss==sort(wss,decreasing=T))==0) {
+  wss <- (nrow(kdata)-1)*sum(apply(kdata,2,var))
+  for (i in 2:n.lev) wss[i] <- sum(kmeans(kdata, centers=i)$withinss)}
+
+# Calculate the within groups SSE for 250 randomized data sets (based on the original input data)
+k.rand <- function(x){
+  km.rand <- matrix(sample(x),dim(x)[1],dim(x)[2])
+  rand.wss <- as.matrix(dim(x)[1]-1)*sum(apply(km.rand,2,var))
+  for (i in 2:n.lev) rand.wss[i] <- sum(kmeans(km.rand, centers=i)$withinss)
+  rand.wss <- as.matrix(rand.wss)
+  return(rand.wss)
+}
+
+rand.mat <- matrix(0,n.lev,250)
+
+k.1 <- function(x) { 
+  for (i in 1:250) {
+    r.mat <- as.matrix(suppressWarnings(k.rand(kdata)))
+    rand.mat[,i] <- r.mat}
+  return(rand.mat)
+}
+rand.mat <- k.1(kdata)
+
+
+# Plot within groups SSE against all tested cluster solutions for actual and randomized data - log scale
+xrange <- range(1:n.lev)
+yrange <- range(log(rand.mat),log(wss))
+plot(xrange,yrange, type='n', xlab='Cluster Solution', ylab='Log of Within Group SSE', main='Cluster Solutions against Log of SSE')
+for (i in 1:250) lines(log(rand.mat[,i]),type='l',col='red')
+lines(log(wss), type="b", col='blue')
+legend('topright',c('Actual Data', '250 Random Runs'), col=c('blue', 'red'), lty=1)
+```
+
+Above is the plot of within groups SSE against all tested cluster solutions for actual and randomized data. From looking at this plot, it is evident that **the correct number of groups is three.** After the third cluster, the within group SSE of the actual data begins to decrease at a rate very similar to that of the random runs. This yields the same result as Euclidean and Ward's Method did above, which suggests that the groups are fairly well defined. Further, I examined which players were placed in which cluster, and whether the clusters created using k-means and Ward's Method contained the same players. Over 88% of the players were clustered the same way using k-means and Ward's Method with Euclidean and Manhattan distances. This provides evidence that not only should there be three clusters, but that they are fairly well defined.
+
+In terms of what effect this would have for a general manager, it would suggest that it is important for a team to have players that lie in each of these three clusters. In addition, a general manager should look to compare players within clusters rather than necessarily by their actual size, declared position, and overall statistics.
+
+
+# MANOVA
+
+In this section I explore the effect that the categorical variables position and age-range have on players' on-court tendencies, specifically their average speed and distance traveled per game. Below are the interaction plots for each response variable.
+
+```{r echo=FALSE}
+nbastats <- read.csv("NBA_stats_combined.csv", as.is=TRUE)
+interaction.plot(nbastats$agerange,nbastats$pos.f,nbastats$distMI,
+                 lwd=3,col=c("red","blue","black","green","pink"),xlab="Age",ylab="Average Distance (Miles)",
+                 main="Interaction Plot for Average Distance Covered Per Game Total")
+```
+
+This interaction plot shows how the average distance covered per game varies with age for each position. Plots of the average distance on offense and defense are similar to this, meaning that these trends do not change much when looking at offense, defense, or the total. This plot reveals that big men (power forwards and centers) cover less distance in a game compared to smaller players. This makes sense because bigger players are generally more stationary and closer to the basket on both sides of the ball, so they naturally cover less distance over the course of a game. The other trend that becomes apparent in these plots is that most players reach their highest levels of distance covered per game between the ages of 25 and 30. This aligns well with the general intuition that players peak in those ages. At their peak, players should in theory be in their best physical shape, allowing them to move more during the game, both chasing players on defense and getting open on offense.
+
+```{r echo=FALSE}
+interaction.plot(nbastats$agerange,nbastats$pos.f,nbastats$avgspeed,
+                 lwd=3,col=c("red","blue","black","green","pink"),xlab="Age",ylab="Average Speed",
+                 main="Interaction Plot for Average Speed Per Game Total")
+```
+
+This interaction plot shows how the average speed per game of a player varies with age and position. This plot shows that there is a more consistent difference by position on average speed as compared to total distance traveled, and that age has a roughly linear (negative) correlation with average speed. In addition, the plots for average speed on offense and defense differ significantly:
+
+```{r echo=FALSE}
+interaction.plot(nbastats$agerange,nbastats$pos.f,nbastats$avgspeedO,
+                 lwd=3,col=c("red","blue","black","green","pink"),xlab="Age",ylab="Average Speed",
+                 main="Interaction Plot for Average Speed Per Game on Offense")
+
+interaction.plot(nbastats$agerange,nbastats$pos.f,nbastats$avgspeedD,
+                 lwd=3,col=c("red","blue","black","green","pink"),xlab="Age",ylab="Average Speed",
+                 main="Interaction Plot for Average Speed Per Game on Defense")
+```
+
+On offense, there is a clear hierarchy as to which players move the fastest, with point guards being at the top followed by shooting guards, small forwards, power forwards and centers. Interestingly, bigger players appear to experience a larger dropoff in average speed over the course of their careers than guards do, perhaps because it is not as vital an aspect of their game and they therefore can focus on their strengths inside rather than their speed as they get older. On defense however, the average speeds of all five positions are quite similar. Power forwards and centers are still noticeably slower than smaller players, but the differences are much smaller than on offense. Finally, the plot for average speed total seems to even out the exaggerated differences on offense and the similar values on defense. Point guards clearly have the highest average speeds, followed by shooting guards and small forwards who are very similar, and then power forwards with centers coming in last. This third plot also provides more evidence for the fact that average speed of players of all positions decreases with age.
+
+```{r echo=FALSE}
+mod <- manova(as.matrix(nbastats[,c(53:58)])~nbastats$pos.f+nbastats$agerange
+                    + nbastats$pos.f*nbastats$agerange)
+summary.aov(mod)
+```
+
+The **univariate results** of the two-way MANOVA show that there are significant differences between the univariate means of each position and age range with respect to each of the six variables. However, the interaction between position and age range only predicts a significant difference in the means of the variables relating to distance traveled per game (distMI p=.05, distMIO p=.04, distMID p=.08) but not those pertaining to average speed.
+
+```{r echo=FALSE}
+summary.manova(mod)
+summary.manova(mod,test="Wilks")
+```
+
+The **multivariate results** provide a similar result: there are significant differences between the multivariate means of different positions and age ranges, but not of the interaction of the two.
+
+### Contrasts
+
+```{r echo=FALSE, include=FALSE}
+suppressWarnings(library(contrast))
+library(sandwich)
+```
+
+This first contrast shows that there is a statistically significant difference between point guards and centers in their average distance on offense. This was expected and supports the observations discussed above about the interaction plots.
+
+```{r echo=FALSE}
+nbaaov <- lm(distMIO~pos.f, data=nbastats)
+contrast1 <- contrast(nbaaov, list(pos.f="PG"), list(pos.f="C"))
+print(contrast1,X=TRUE)
+```
+
+The second contrast compares small forwards and power forwards, and reveals that there is a statistically significant difference between them, though it is not nearly as significant as the difference between point guards and centers, which is what one would expect.
+
+```{r echo=FALSE}
+contrast2 <- contrast(nbaaov, list(pos.f="SF"), list(pos.f="PF"))
+print(contrast2,X=TRUE)
+```
+
+There is not a statistically significant difference between power forwards and centers. Therefore, as was seen in the interaction plot, there are two distinct types of players on offense, at least with regard to the amount of distance they cover. Point guards, shooting guards, and small forwards are very similar to each other and cover more distance on average than the other group of power forwards and centers.
+
+```{r echo=FALSE}
+contrast3 <- contrast(nbaaov, list(pos.f="PF"), list(pos.f="C"))
+print(contrast3,X=TRUE)
+```
+
+
+Second set of contrasts, this time with respect to the average speed of a player on offense:
+
+* **Point guards vs. shooting guards**
+```{r echo=FALSE}
+nbaaovspeed <- lm(avgspeedO~pos.f, data=nbastats)
+contrast4 <- contrast(nbaaovspeed, list(pos.f=c("PG")),list(pos.f=c("SG")),type='average')
+print(contrast4,X=TRUE)
+```
+
+* **Shooting guards vs. small forwards**
+```{r echo=FALSE}
+contrast4 <- contrast(nbaaovspeed, list(pos.f=c("SG")),list(pos.f=c("SF")),type='average')
+print(contrast4,X=TRUE)
+```
+
+* **Power forwards vs. small forwards**
+```{r echo=FALSE}
+contrast4 <- contrast(nbaaovspeed, list(pos.f=c("PF")),list(pos.f=c("SF")),type='average')
+print(contrast4,X=TRUE)
+```
+
+* **Power forwards vs. centers**
+```{r echo=FALSE}
+contrast5 <- contrast(nbaaovspeed, list(pos.f=c("PF")),list(pos.f=c("C")),type='average')
+print(contrast5,X=TRUE)
+```
+
+From these contrasts, we can see that the positions are more clearly divided in average speed than in distance covered (previous set of contrasts). Point guards are in a class of their own, shooting guards and small forwards are indistinguishable, and power forwards and centers are each separate. An interesting conclusion that this finding leads to is that shooting guard and small forward are virtually the same position. From watching basketball games, one can see that their roles are very similar: neither of them are the primary ball handlers (other than certain exceptions like LeBron James) but both of them are usually stationed around the perimeter. Players are still often identified as one or the other because of long-standing convention, but once on the court it is essentially impossible to distinguish which player is occupying each of these positions. A player's average speed is by no means a perfect indicator of position, but it is interesting to see that similarities and differences observed by the naked eye are backed up by this statistic.
+
+Now I will make plots to see whether there are linear relationships between my predictors (average speed and average distance on defense) and my response variable (steals).
+
+```{r echo=FALSE}
+plot(STL~avgspeedD, data=nbastats)
+plot(STL~distMID, data=nbastats)
+```
+
+Surprisingly, it is evident from these plots that there is a linear relationship between steals and distance, but not between steals and speed.
+
+Next, I added assists as a covariate to the offensive model, and steals to the defensive one.
+
+```{r echo=FALSE}
+offense <- cbind(nbastats$distMIO, nbastats$avgspeedO)
+defense <- cbind(nbastats$distMID, nbastats$avgspeedD)
+nbamodO <- manova(offense~nbastats$pos.f+nbastats$agerange+nbastats$AST)
+nbamodD <- manova(defense~nbastats$pos.f+nbastats$agerange+nbastats$STL)
+
+summary.aov(nbamodO)
+```
+
+All three predictors show a statistically significant difference between the various univariate group means, both for distance traveled and average speed (both on offense).
+
+```{r echo=FALSE}
+summary.aov(nbamodD)
+```
+
+Similarly to the offensive MANOVA, this one (for defense) showed statistically significant differences between group means for each predictor.
+
+```{r echo=FALSE}
+summary.manova(nbamodO,test="Wilks")
+```
+
+The multivariate results of the offensive MANOVA reveal a difference in group means for different age ranges, positions, and number of steals, with respect to distance covered and average speed on offense.
+
+```{r echo=FALSE}
+summary.manova(nbamodD,test="Wilks")
+```
+
+Once again, multivariate group means appear to be different for the same predictors and response variables as above, this time for defense.
+
+
+# Discussion
+
+In summary, these analyses provide a new categorization for players, as well as a way of distinguishing among player types.
+
+* From PCA, we learned that variation among players is primarily divided into two components: overall skill (as measured by minutes played, two-point attempts and conversions, free throw attempts and makes, defensive rebounds, and personal fouls), and size (as measured by field goal and two point %, three point and free throw %, three pointers attempted and made, and offensive rebounds).
+* Cluster analysis showed that the traditional division of players by position does not capture or describe their impact on a basketball game. Instead, players who are listed as playing different positions may indeed have similar impacts as measured by the similarity in their performance across the statistics that comprised my dataset. Speificially, cluster analysis revealed that the players can be best divided into three groups, that I interpret as big men, high usage players (players who tend to dominate the ball or be involved in a majority of the team's production), and secondary players (those who are not the dominant players on their respective teams).
+* The MANOVA analysis ignored the individual player distinctions and instead explored differences between average speed and distance across positions and age. It was revealed that point guards and centers are at extremes with the other positions in the middle with respect to speed and distance, with points guards being the fastest and most traveled. However, the effect was less clear for distance. A clear effect was also detected for age, with players becoming slower as they aged. On the other hand, distance experienced a peak in the middle of a player's career (between the ages of 25 and 30). The effect of age was roughly uniform for speed across positions, but varied by position for distance traveled.
+
+On the one hand, these results are not very surprising. Talent shows up as the first principal component, which means that those players who play the most during games produce the best results. However, the divisions yielded by the cluster analysis suggest that general managers might be better off acquiring the best players available within these clusters rather than necessarily filling their rosters with players of the five traditional positions. Finally, the MANOVA provides a way of assessing player performance as they age, and might provide guidance for deciding how much longer in their career a player might be able to make an impact on the court. 
+
+
+## Points for Further Analysis
+
+* Based on the MANOVA analysis, it would be interesting to explore whether the change in a player's average speed and distance over time relative to the average of his position is predictive of his future contract length and salary or of other measured statistics, both during the observed time and in the future.
+* Another path for further analysis might be to go into greater depth about a certain aspect of the game. For example, I could use more detailed data about a player's shooting tendencies in terms of location, time of game, remaining time on the shot clock, and how the shot was taken (with a teammate's assist or a play created alone).
